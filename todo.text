@@ -714,3 +714,56 @@ Computes all 12 standard technical indicators
 Replicates the “Trader’s Cheat Sheet” style pivot points, standard deviations, potential Fibonacci levels, etc.
 Calculates a Barchart-style “Opinion” rating using short-, medium-, long-term indicators plus a “Trend Seeker®” placeholder.
 You can copy-paste the sample code, customize it to your environment (contract details, time frames, additional or alternative formulas), and you’ll have a solid starting point. If you need further adjustments, just let me know!
+
+
+
+Prompting Suggestions
+Clarify the structure:
+You might instruct the assistant to format the answer in a structured way (e.g., using bullet points or numbered sections for the recommendation, justification, and risk factor). For example:
+
+"Please format your response with a header, followed by bullet points for each of the required sections (trade recommendation, probability, fundamental justification, technical justification, and macro risk)."
+
+Add explicit constraints:
+Make sure you reiterate the word count and numerical boundaries, so the model consistently adheres to them. For instance, mention:
+
+"Ensure the entire response is under 100 words and the probability is a single integer between 40 and 80."
+
+Contextual clarity:
+Consider including a brief sentence about the market context or any assumptions. This could help the assistant tailor its answer to the MES futures environment more accurately.
+
+Stylistic tone:
+If you want the analysis to reflect a specific tone (e.g., conservative, technical, or bullish), specify that.
+
+"Answer in the tone of an expert trader with concise technical insights."
+
+Making It Live
+To run this code every five minutes, you can use a scheduler. Here are two approaches:
+
+Using Python’s schedule library:
+Install the library via pip install schedule and wrap your main() call like this:
+
+python
+Copy
+import schedule
+import time
+
+def job():
+    try:
+        main()
+    except Exception as e:
+        print("Error during job execution:", e)
+
+schedule.every(5).minutes.do(job)
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
+Using a Cron Job (Linux/macOS):
+If you're on a Unix-like system, you can set up a cron job to execute your script every five minutes. For example, add this line to your crontab (edit with crontab -e):
+
+swift
+Copy
+*/5 * * * * /usr/bin/env python3 /path/to/your/script.py
+Both methods help you create a live market AI assistant that updates its analysis every five minutes. This approach makes sense if you want real-time insights on the MES futures contract.
+
+Does that help clarify your next steps?
