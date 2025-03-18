@@ -395,13 +395,13 @@ class IBApp(EWrapper, EClient):
         Example: 'MESM5' for June 2025.
         """
         contract = Contract()
-        contract.symbol = "MES"
-        contract.secType = "FUT"
-        contract.exchange = "GLOBEX"
-        contract.currency = "USD"
-        # For demonstration, using 'MESM5'. 
-        # In real usage, pick the correct front-month or rolling logic.
-        contract.localSymbol = "MESM5"
+        contract.symbol = "MES"  # Symbol
+        contract.secType = "FUT"  # Security Type
+        contract.exchange = "CME"  # Exchange
+        contract.currency = "USD"  # Currency
+        contract.lastTradeDateOrContractMonth = "20250321"  # Expiry
+        contract.localSymbol = "MESH5"  # Local Symbol
+        contract.multiplier = "5"  # Multiplier
         return contract
 
     @iswrapper
@@ -633,9 +633,10 @@ def build_ai_prompt(fundamentals, technicals):
 
 def get_ai_analysis(prompt):
     """
-    Calls OpenAI ChatCompletion with the given prompt.
+    Calls OpenAI ChatCompletion with the given prompt,
+    but using the new openai>=1.0.0 syntax.
     """
-    response = openai.ChatCompletion.create(
+    response = openai.chat.completions.create(
         model="gpt-4",
         messages=[
             {"role": "system", "content": prompt}
@@ -644,14 +645,13 @@ def get_ai_analysis(prompt):
         temperature=0.7
     )
     return response.choices[0].message.content.strip()
-
 ###############################################################################
 # MAIN SCRIPT
 ###############################################################################
 
 def main():
     # 1) Connect to IB and fetch MES data
-    app = IBApp("127.0.0.1", 7497, clientid=1)
+    app = IBApp("127.0.0.1", 7496, clientid=1)
     app.connect_and_run()
 
     # Wait for data retrieval
