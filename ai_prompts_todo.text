@@ -1,0 +1,846 @@
+Below is a step-by-step pseudo code plan for creating a terminal-based Python application that integrates:
+###############################################################################
+# 1. Helper Functions for Technical Indicators
+###############################################################################
+
+def compute_moving_average(series, window):
+    """Simple moving average over a specified window."""
+    return series.rolling(window=window).mean()
+
+def compute_price_change(series, window):
+    """Difference between current close and close 'window' days ago."""
+    return series - series.shift(window)
+
+def compute_percent_change(series, window):
+    """Percent change from 'window' days ago."""
+    old_price = series.shift(window)
+    return (series - old_price) / (old_price) * 100
+
+def compute_average_volume(volume_series, window):
+    """Average volume over 'window' days."""
+    return volume_series.rolling(window=window).mean()
+
+def compute_stochastics(df, period=14, k_smooth=3, d_smooth=3):
+    """
+    Compute Raw Stochastic, %K, %D for given period.
+    Raw = (Close - LowestLow(period)) / (HighestHigh(period) - LowestLow(period)) * 100
+    %K = SMA of Raw (k_smooth)
+    %D = SMA of %K (d_smooth)
+    """
+    low_min = df['low'].rolling(period).min()
+    high_max = df['high'].rolling(period).max()
+    raw_stoch = (df['close'] - low_min) / (high_max - low_min) * 100
+    
+    # %K is an EMA or SMA of raw_stoch (many variations exist, we'll do SMA)
+    k = raw_stoch.rolling(k_smooth).mean()
+    # %D is an SMA of %K
+    d = k.rolling(d_smooth).mean()
+    
+    return raw_stoch, k, d
+
+def compute_atr(df, period=14):
+    """
+    Average True Range.
+    True Range = max of:
+      (high - low),
+      abs(high - prev_close),
+      abs(low - prev_close)
+    ATR = SMA of True Range over 'period'.
+    """
+    df['prev_close'] = df['close'].shift(1)
+    df['tr1'] = df['high'] - df['low']
+    df['tr2'] = (df['high'] - df['prev_close']).abs()
+    df['tr3'] = (df['low'] - df['prev_close']).abs()
+    df['true_range'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    df['atr'] = df['true_range'].rolling(period).mean()
+    return df['atr']
+
+def compute_rsi(series, period=14):
+    """
+    Classic 14-day RSI.
+    """
+    delta = series.diff().dropna()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    # Reindex to original length
+    return rsi.reindex(series.index)
+
+def compute_percent_r(df, period=14):
+    """
+    Williams %R = (HighestHigh - Close) / (HighestHigh - LowestLow) * -100
+    Usually period=14
+    """
+    high_max = df['high'].rolling(period).max()
+    low_min = df['low'].rolling(period).min()
+    return (high_max - df['close']) / (high_max - low_min) * -100
+
+def compute_historic_volatility(series, period=20):
+    """
+    Historical Volatility, annualized (approx).
+    1) daily returns = ln(today_close / yesterday_close)
+    2) stdev of daily returns over 'period'
+    3) multiply stdev by sqrt(260) to annualize (some use 252 or 365)
+    """
+    log_ret = np.log(series / series.shift(1))
+    stdev = log_ret.rolling(window=period).std()
+    hv = stdev * np.sqrt(260) * 100  # in %, approx
+    return hv
+
+def compute_macd(series, fast=12, slow=26, signal=9):
+    """
+    MACD = EMA(fast) - EMA(slow)
+    Signal line = EMA(MACD, signal)
+    MACD Oscillator = MACD - Signal line
+    For demonstration, we’ll do a standard approach:
+      - We can modify to use a 3-day or 9-day MA as per Barchart’s custom approach
+    """
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return histogram  # "MACD Oscillator"
+
+###############################################################################
+# 2. Trader's Cheat Sheet & Pivot Points, S/R
+###############################################################################
+
+def compute_pivots_s_r(high, low, close):
+    """
+    Standard pivot point calculations for the next session.
+    Returns PP, R1, R2, R3, S1, S2, S3
+    """
+    pp = (high + low + close) / 3
+    r1 = 2 * pp - low
+    s1 = 2 * pp - high
+    r2 = pp + (r1 - s1)
+    s2 = pp - (r1 - s1)
+    r3 = high + 2 * (pp - low)
+    s3 = low - 2 * (high - pp)
+    return pp, r1, r2, r3, s1, s2, s3
+
+def compute_std_devs(series_close, stdev_multiplier=[1,2,3]):
+    """
+    Returns a dict with {1: stdev1, 2: stdev2, 3: stdev3}.
+    Uses last 5 closes to match Barchart’s example or modify as needed.
+    """
+    last_5 = series_close.iloc[-5:]
+    avg = last_5.mean()
+    
+    # Step 2: Differences from average
+    diffs = last_5 - avg
+    # Step 3: Square them
+    squared = diffs**2
+    # Step 4: sum of squares
+    sum_sq = squared.sum()
+    # Step 5: for stdev2 multiply result by 2 (and for stdev3 by 3),
+    #    but typically we do that *after* we take the average.
+    # Step 6: divide by (N-1)
+    var = sum_sq / (len(last_5) - 1)
+    # Step 7: sqrt for stdev
+    base_stdev = np.sqrt(var)
+    
+    out = {}
+    for m in stdev_multiplier:
+        out[m] = base_stdev * m
+    return out, avg
+
+def compute_fib_levels(recent_high, recent_low):
+    """
+    Compute 38.2%, 50%, 61.8% retracements from a given high/low.
+    """
+    diff = recent_high - recent_low
+    fib_382 = recent_high - 0.382 * diff
+    fib_50  = (recent_high + recent_low) / 2
+    fib_618 = recent_high - 0.618 * diff
+    return fib_382, fib_50, fib_618
+
+###############################################################################
+# 3. Barchart Opinion Calculation
+###############################################################################
+
+def mock_trend_seeker(df):
+    """
+    Placeholder for the proprietary Trend Seeker®.
+    We’ll just do a simplistic approach: Compare short EMA vs. long EMA.
+    If short EMA > long EMA, SELL if price is below short EMA, else BUY, etc.
+    This is just an example. Real logic is hidden by Barchart.
+    """
+    short_ema = df['close'].ewm(span=10).mean().iloc[-1]
+    long_ema  = df['close'].ewm(span=50).mean().iloc[-1]
+    last_price = df['close'].iloc[-1]
+
+    # We'll define a naive logic:
+    if short_ema > long_ema and last_price > short_ema:
+        return 1  # "Buy"
+    elif short_ema < long_ema and last_price < short_ema:
+        return -1  # "Sell"
+    return 0  # "Hold"
+
+def indicator_signal(value, threshold_up=0, threshold_down=0):
+    """
+    Converts a numeric value into buy/sell/hold signals
+    for demonstration. Real logic per indicator is more specific.
+    threshold_up > 0 => buy
+    threshold_down < 0 => sell
+    """
+    if value > threshold_up:
+        return 1
+    elif value < threshold_down:
+        return -1
+    else:
+        return 0
+
+def barchart_opinion_logic(df):
+    """
+    Summarize 13 (or more) indicators into short-, medium-, and long-term signals.
+    Barchart typically does:
+      - Short-term: 5 indicators
+      - Medium-term: 4 indicators
+      - Long-term: 3 indicators
+      - Trend Seeker: 1 indicator
+    Return a dictionary with signals and final percentages.
+    """
+    # We assume we already have at least 200 rows for the 200-day lookback.
+
+    last = df.iloc[-1]
+
+    # 1) Short Term (20 days lookback)
+    #    Example: Price vs. 20 MA, 7-day ADX, Bollinger, etc. => We'll approximate
+    short_signals = []
+    # Price vs 20-day MA
+    price20ma = last['close'] - last['MA_20']
+    short_signals.append(indicator_signal(price20ma))
+
+    # 7 day ADX or directional => We’ll do a naive approach
+    # For demonstration, let's say if last 7-day slope is positive => buy, negative => sell
+    short_slope_7 = df['close'].diff().tail(7).mean()
+    short_signals.append(indicator_signal(short_slope_7))
+
+    # 20 Day Bollinger logic => If close < lower band => buy, if close > upper band => sell
+    # (We’ll skip the actual band calc for brevity, just placeholder)
+    # short_signals.append(...) 
+    # ... etc. We’ll just fill with hold for the sake of the example
+    short_signals.append(0)
+
+    # 20-50 day MA crossover
+    # If 20MA > 50MA => buy, else => sell
+    if last['MA_20'] > last['MA_50']:
+        short_signals.append(1)
+    else:
+        short_signals.append(-1)
+
+    # Another placeholder for short-term indicator
+    short_signals.append(0)
+
+    # 2) Medium Term (50 days lookback)
+    medium_signals = []
+    # 50MA vs price
+    price50ma = last['close'] - last['MA_50']
+    medium_signals.append(indicator_signal(price50ma))
+    # 20-100 day crossover
+    if last['MA_20'] > last['MA_100']:
+        medium_signals.append(1)
+    else:
+        medium_signals.append(-1)
+    # 40/50 CCI or something else => placeholder
+    medium_signals.append(0)
+    # 50 day parabolic => placeholder
+    medium_signals.append(0)
+
+    # 3) Long Term (100-200 days lookback)
+    long_signals = []
+    # Price vs 100 day
+    price100ma = last['close'] - last['MA_100']
+    long_signals.append(indicator_signal(price100ma))
+    # 50-100 day crossover
+    if last['MA_50'] > last['MA_100']:
+        long_signals.append(1)
+    else:
+        long_signals.append(-1)
+    # We can do 200 day logic as well
+    price200ma = last['close'] - last['MA_200']
+    long_signals.append(indicator_signal(price200ma))
+
+    # Trend Seeker®
+    trend_seeker_signal = mock_trend_seeker(df)
+
+    # Now sum them up
+    short_avg = sum(short_signals) / len(short_signals)
+    medium_avg = sum(medium_signals) / len(medium_signals)
+    long_avg = sum(long_signals) / len(long_signals)
+
+    # Overall: 13 indicators => we have 5 short + 4 medium + 3 long + 1 trend = 13 total
+    combined = short_signals + medium_signals + long_signals + [trend_seeker_signal]
+    overall = sum(combined) / len(combined)
+
+    # Convert to "Buy/Hold/Sell" by sign
+    # Then factor by 1.04 to get multiples of 8% for the “Opinion”
+    raw_percent = overall * 100  # e.g. if overall= +1 => 100% buy
+    # Barchart uses sign => +, -, or 0 for buy/sell/hold
+    # Then "factor the final result by 1.04" - This is approximate
+    factored_percent = abs(raw_percent) * 1.04
+    # Round factored_percent to nearest multiple of 8, except for 100% extremes
+    # This is just a demonstration, you can refine rounding logic:
+    possible_vals = [8,16,24,32,40,48,56,64,72,80,88,96,100]
+    def nearest_opinion_pct(x):
+        # If x >= 95 => 100
+        if x >= 95:
+            return 100
+        # else find closest in possible_vals
+        return min(possible_vals, key=lambda v: abs(v - x))
+
+    final_opinion_pct = nearest_opinion_pct(factored_percent)
+    sign = np.sign(overall)  # +1 => buy, -1 => sell, 0 => hold
+
+    if sign > 0:
+        final_opinion_str = f"{final_opinion_pct}% Buy"
+    elif sign < 0:
+        final_opinion_str = f"{final_opinion_pct}% Sell"
+    else:
+        final_opinion_str = "Hold"
+
+    results = {
+        'short_avg': short_avg,
+        'medium_avg': medium_avg,
+        'long_avg': long_avg,
+        'trend_seeker_signal': trend_seeker_signal,
+        'overall_numeric': overall,
+        'overall_opinion': final_opinion_str
+    }
+    return results
+
+
+
+Alpha Vantage (for fundamentals, e.g., SPY data as a proxy for the S&P 500)
+IBAPI (for MES futures’ historical price data and technical indicator calculations)
+OpenAI (for generating AI-driven trade recommendations and rationale)
+Important: This plan preserves all the technical logic shown in your code snippets, including:
+
+The 12 technical indicators (MA, RSI, MACD, etc.)
+Trader’s Cheat Sheet (Pivot Points, SD levels, etc.)
+Barchart-Style Opinion logic
+GPT-based prompts
+When you eventually implement the code, you’ll merge these steps into a cohesive script or multiple modules. Nothing is removed; the outline simply shows how each piece fits together.
+
+High-Level Application Flow
+Load Environment Variables / Configuration
+
+e.g., from .env file or environment variables to store API keys (OpenAI key, Alpha Vantage key).
+Validate the keys are present (similar to how you validated OPENAI_API_KEY previously).
+Define Data Retrieval Functions
+
+Alpha Vantage – For fundamental data on SPY (or other S&P 500 proxy).
+A function to request OVERVIEW or EARNINGS endpoints to get P/E ratio, earnings growth, etc.
+Parse JSON response, return a dictionary of fundamental metrics.
+IBAPI – For MES historical daily bars.
+(Already in your IBApp class in the provided code.)
+Connect to TWS or IB Gateway, request ~1 year of daily data, store in self.historical_data.
+Prepare Technical Indicator Calculations
+
+Same logic as in your snippet:
+compute_moving_average(), compute_rsi(), compute_macd(), etc.
+compute_atr(), compute_stochastics(), compute_historic_volatility()
+All remain unchanged. These are used to process the MES price data from IBAPI.
+Trader’s Cheat Sheet & Barchart Opinion
+
+Same logic:
+compute_pivots_s_r(), compute_std_devs(), compute_fib_levels()
+barchart_opinion_logic() (including the short-term, medium-term, and long-term signals plus “Trend Seeker®” placeholder).
+Process / Analyze the MES Data
+
+Same logic in process_data() method:
+Convert raw self.historical_data to a DataFrame.
+Compute all technical indicators (MA_5, MA_20, RSI, etc.).
+Print the “Technical Analysis Summary” in the terminal:
+Short, medium, long MAs and changes
+ATR, RSI, MACD readouts
+Trader’s Cheat Sheet pivot points, standard deviations
+Barchart-style opinion signals
+Key: After printing the results in the terminal, you will also pass the final computed values to OpenAI for an AI-generated summary.
+Fetch Fundamental Data (SPY) and Merge with MES Indicators
+
+Before or after you run process_data(), call your get_alpha_vantage_fundamentals() function to get SPY data (P/E ratio, forward P/E, etc.).
+Combine these fundamental metrics in a dictionary (e.g., fundamentals = {...}).
+Combine final MES technical results in another dictionary (e.g., technicals = {...}).
+OpenAI Prompt Construction
+
+Borrow from your prompt templates. For example:
+text
+Copy
+You are an advanced trading assistant analyzing the MES futures contract.
+
+### Fundamental Data (via Alpha Vantage):
+- SPY P/E Ratio: {fundamentals['pe_ratio']}
+- SPY Forward P/E: {fundamentals['forward_pe']}
+- Earnings Growth (YoY): {fundamentals['earnings_growth']}%
+- ...
+
+### Technical Data (via IBAPI for MES):
+- Current MES Price: {technicals['last_close']}
+- 20-day MA: {technicals['ma_20']}, ...
+- RSI (14-day): {technicals['rsi_14']}
+...
+### TASK
+1) ...
+2) Probability...
+3) ...
+...
+Keep your logic for:
+Probability constraints (40–80%, etc.)
+Explanation length constraints (under 100 words, etc.)
+Summarize the best trade recommendation (Buy/Sell/Hold), rationale, risk factors, stop-loss, etc.
+Call OpenAI API
+
+Use openai.ChatCompletion.create(...) with the above prompt.
+Store or print the AI’s text response.
+Final Terminal Output
+
+First, the script prints the “Technical Analysis” (like your current code does):
+The big block with MAs, RSI, pivot points, Barchart Opinion, etc.
+Then, print the AI’s OpenAI-generated summary:
+e.g., “AI Recommendation: Buy (Probability ~65%). Reasoning: …”
+Main Execution
+
+Initialize IBAPI client (IBApp).
+Run the connect_and_run() to fetch MES data.
+Wait until request_completed is True.
+In process_data():
+Do all the indicator calculations & terminal printouts.
+Store final technical snapshot (last row, or aggregated signals) in a dictionary.
+Call your Alpha Vantage function to get fundamentals (SPY, etc.).
+Construct an OpenAI prompt that merges the fundamental + technical data.
+Send the prompt to the AI, get the recommendation text.
+Print the AI’s recommendation in the terminal after the technical data block.
+Exit the script.
+Potential Enhancements (But Still Not Removing Any Logic)
+
+Optionally schedule or loop to update data throughout the trading day.
+Possibly store the AI’s outputs in a CSV or database for logging.
+Add “Trend Seeker®” expansions or exact Barchart formulas if you want 1:1 matching.
+Detailed Pseudo Code Steps
+Below is a more granular breakdown in pseudo code format, retaining all indicator logic:
+
+plaintext
+Copy
+BEGIN pseudo code:
+
+1) LOAD ENV VARS:
+   - openai_api_key <- from .env or environment
+   - alpha_vantage_api_key <- from .env or environment
+   IF missing any key, RAISE error
+
+2) DEFINE FUNCTION fetch_alpha_vantage_fundamentals():
+   - endpoint_url = "https://www.alphavantage.co/query?function=OVERVIEW&symbol=SPY&apikey=alpha_vantage_api_key"
+   - response = requests.get(endpoint_url)
+   - parse JSON
+   - return {
+       "pe_ratio": <PE>,
+       "forward_pe": <FPE>,
+       "earnings_growth": <EGR>,
+       "dividend_yield": <DIV> 
+       ...
+   }
+
+3) CLASS IBApp(EWrapper, EClient):
+   - historical_data = []
+   - request_completed = False
+   - nextValidId(...) -> triggers request_historical_data()
+   - request_historical_data():
+       contract = create_mes_contract()
+       reqHistoricalData(reqId=1, ...)
+   - create_mes_contract():
+       contract.symbol = "MES"
+       contract.localSymbol = "MESM5"  # or custom
+       ...
+       return contract
+   - historicalData(reqId, bar):
+       historical_data.append(bar)
+   - historicalDataEnd(...):
+       request_completed = True
+       process_data()
+       disconnect()
+
+   - process_data():
+       df = pd.DataFrame(historical_data)
+       df.sort_values("date", ...)
+       # 1) compute all indicators (MA, RSI, etc.)
+         df["MA_5"] = compute_moving_average(...)
+         ...
+         df["macd"] = compute_macd(...)
+       # 2) barchart_opinion_results = barchart_opinion_logic(df)
+       # 3) print technical tables to terminal
+         print "Technical Analysis summary..."
+         ...
+       # 4) (optionally) return a dictionary of final 'latest' row data so we can pass it to AI
+
+4) DEFINE compute_* functions for all indicators:
+   - compute_moving_average(series, window)
+   - compute_rsi(series, period)
+   - compute_macd(series, fast, slow, signal)
+   - etc.
+   (same logic, no changes)
+
+5) DEFINE barchart_opinion_logic(df):
+   - short_signals = ...
+   - medium_signals = ...
+   - long_signals = ...
+   - combine them, compute overall
+   - apply 1.04 factor, map to nearest multiple of 8
+   - return dict with final_opinion_str, short_avg, medium_avg, etc.
+
+6) DEFINE openai_prompt_builder(fundamentals, technicals):
+   - build a string that includes:
+     "You are an advanced trading assistant analyzing the MES futures contract..."
+     "### Fundamental Data (SPY) => fundamentals['pe_ratio']..."
+     "### Technical Data => technicals['rsi_14']..."
+     "TASK: 1) ... 2) Probability..."
+   - return the final prompt string
+
+7) DEFINE get_ai_analysis(prompt):
+   - openai.ChatCompletion.create(model="gpt-4", messages=[{"role":"system","content":prompt}], ...)
+   - parse response, return text
+
+8) MAIN SCRIPT:
+   - Initialize app = IBApp("127.0.0.1", 7497, clientid=1)
+   - app.connect_and_run()
+   - Wait for request_completed or timeout
+   - Once done, in process_data() we have terminal prints done
+   - fundamentals = fetch_alpha_vantage_fundamentals()
+   - # get final row or aggregated signals from the app => e.g. technical_dict
+   - prompt = openai_prompt_builder(fundamentals, technical_dict)
+   - ai_text = get_ai_analysis(prompt)
+   - print("AI Analysis:\n", ai_text)
+   - exit
+
+END pseudo code
+Next Steps
+If you need clarification on where to store final computed indicators for the AI prompt, or how to structure the dictionaries, please let me know.
+Otherwise, you can take this plan and turn it into a fully integrated script that:
+Downloads SPY fundamentals (Alpha Vantage),
+Pulls MES data & calculates indicators (IBAPI),
+Prints the thorough technical analysis block (already in your code),
+Summarizes everything with a GPT-based “trade decision” (OpenAI).
+
+
+Below is a prompt snippet you can feed into your LLM (e.g., GPT-4) after you have both sets of data (Alpha Vantage for fundamentals + IBAPI for MES price and technicals).
+
+
+You are an advanced trading assistant analyzing the MES futures contract.
+
+### Fundamental Data (via Alpha Vantage):
+- SPY P/E Ratio: {{pe_ratio}}
+- SPY Forward P/E: {{forward_pe}}
+- Earnings Growth (YoY): {{earnings_growth}}%
+- Dividend Yield: {{dividend_yield}}%
+- Macroeconomic Snapshot: 
+   - US GDP Growth: {{gdp}}
+   - Fed Funds Rate: {{ffr}}
+   - CPI (Inflation): {{cpi}}
+
+### Technical Data (via IBAPI for MES):
+- Current MES Price: ${{mes_price}}
+- 20-day MA: ${{ma_20}}, 50-day MA: ${{ma_50}}
+- RSI (14-day): {{rsi_14}}
+- MACD: {{macd}}
+- ATR (14): {{atr_14}}
+- Support Levels: {{s1}}, {{s2}}
+- Resistance Levels: {{r1}}, {{r2}}
+
+### TASK
+1. Provide a **trade recommendation** (Buy/Sell/Hold).
+2. Estimate the **probability** (0–100%) that MES will move in the recommended direction over the next 2 weeks.
+3. Give a **brief fundamental justification** (based on the S&P 500 valuation metrics).
+4. Give a **brief technical justification** (based on RSI, MACD, support/resistance, etc.).
+5. Mention **one macro risk** that might invalidate this trade.
+
+Rules:
+- Probability must be a single integer from 40–80%.
+- Keep your answer under 100 words total.
+In code, you might do something like:
+
+python
+Copy
+import openai
+
+def get_ai_trade_call(fundamentals, technicals):
+    prompt = f"""
+    You are an advanced trading assistant analyzing the MES futures contract.
+
+    ### Fundamental Data (via Alpha Vantage):
+    - SPY P/E Ratio: {fundamentals['pe_ratio']}
+    - SPY Forward P/E: {fundamentals['forward_pe']}
+    - Earnings Growth (YoY): {fundamentals['earnings_growth']}%
+    - Dividend Yield: {fundamentals['dividend_yield']}%
+    - Macroeconomic Snapshot:
+       - US GDP Growth: {fundamentals['gdp']}%
+       - Fed Funds Rate: {fundamentals['ffr']}%
+       - CPI (Inflation): {fundamentals['cpi']}%
+
+    ### Technical Data (via IBAPI for MES):
+    - Current MES Price: {technicals['last_close']}
+    - 20-day MA: {technicals['ma_20']}, 50-day MA: {technicals['ma_50']}
+    - RSI (14-day): {technicals['rsi_14']}
+    - MACD: {technicals['macd']}
+    - ATR (14): {technicals['atr_14']}
+    - Support Levels: {technicals['s1']}, {technicals['s2']}
+    - Resistance Levels: {technicals['r1']}, {technicals['r2']}
+
+    ### TASK
+    1. Trade recommendation (Buy/Sell/Hold).
+    2. Probability (0–100%) that MES will move in the recommended direction over the next 2 weeks.
+    3. Fundamental justification (based on the S&P 500 valuation metrics).
+    4. Technical justification (RSI, MACD, etc.).
+    5. Mention a major macro risk.
+
+    Rules:
+    - Probability must be a single integer from 40–80%.
+    - Keep your answer under 100 words total.
+    """
+
+    # (Adjust model, temperature, tokens as needed)
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": prompt}
+        ],
+        max_tokens=200,
+        temperature=0.7
+    )
+
+    return response.choices[0].message.content.strip()
+
+3. Sample Prompt Templates for Probability & Fundamentals
+A) Combined Technical + Fundamental Prompt
+Use this to get a trade decision with an estimated probability that the trend will continue.
+
+markdown
+Copy
+You are a senior trading analyst providing a recommendation on the MES (Micro E-mini S&P 500) futures contract.
+
+## Fundamentals (S&P 500 Macro):
+- S&P 500 P/E Ratio: {{pe_ratio}}
+- S&P 500 Earnings Growth (YoY): {{earnings_growth}}%
+- Economic Indicator: {{macro_indicator}} (e.g., GDP growth, Fed statements)
+
+## Technicals (Recent MES Data):
+- Current Price: ${{last_close_price}}
+- 5-Day MA: ${{ma_5}}, 20-Day MA: ${{ma_20}}, 50-Day MA: ${{ma_50}}
+- RSI (14): {{rsi_14}}
+- MACD: {{macd_value}}
+- ATR (14): {{atr_14}}
+- Volume Trend vs. 20-day average: {{volume_trend}}
+- Key Support Levels: {{support_levels}}
+- Key Resistance Levels: {{resistance_levels}}
+
+### TASK
+1. **Trade Decision**: Should we Buy, Sell, or Hold MES futures?
+2. **Probability**: Estimate the probability (0–100%) that the price will trend in the recommended direction over the next X days.
+3. **Fundamental Rationale**: Explain how the macro and fundamental data influence this trade.
+4. **Key Risk Factors**: List at least one major risk that could lower the probability of success.
+5. **Stop Loss & Target**: Suggest a protective stop loss and a target price.
+
+Guidelines:
+- Provide a realistic probability range (e.g., 50–70%).
+- Keep the explanation under 150 words.
+- Do not provide disclaimers beyond pointing out key risks.
+How the AI might respond:
+
+markdown
+Copy
+**Recommendation**: Buy
+**Probability**: ~65% chance of bullish continuation
+**Fundamental Rationale**: The S&P 500’s stable P/E ratio and modest earnings growth support continued upside...
+**Risk Factors**: Unexpected rate hikes or earnings misses...
+**Stop Loss/Target**: Place stop at 4100, target at 4300...
+B) Short-Term Probability Prompt (Intraday or 1-2 Day Horizon)
+If you want intraday or very short-term moves with a probability rating:
+
+markdown
+Copy
+You are an AI day-trading assistant looking at MES futures over the next 1-2 trading days.
+
+## Market Snapshot:
+- Current MES Price: ${{current_price}}
+- 15-min chart RSI: {{rsi_15min}}, 1-hour chart RSI: {{rsi_1h}}
+- MACD (30-min chart): {{macd_30min}}
+- Pivot Points: R1={{pivot_r1}}, S1={{pivot_s1}}
+- Intraday Volume (vs average): {{volume_factor}}
+- Overnight Economic News: {{event}}
+
+### TASK
+1. **Probability**: Provide an approximate probability (0–100%) of a bullish breakout above {{pivot_r1}} in the next 24 hours.
+2. **Decision**: Should we Buy at the open, Sell, or Wait?
+3. **Rationale**: Justify the probability based on RSI, MACD, pivot points, volume, and any news event.
+4. **Trade Setup**: Suggest a day-trade plan (stop-loss, take-profit).
+
+Constraints:
+- Use a single short paragraph (under 75 words).
+- Probability should be between 40% and 70%.
+C) Fundamentals & Macro-Driven Probability Prompt (Longer-Term)
+If you want a more macro/fundamental approach for a multi-week hold:
+
+css
+Copy
+You are a macro-focused AI portfolio strategist analyzing the MES futures contract for a multi-week to multi-month horizon.
+
+## Macro Data:
+- CPI Year-over-Year: {{cpi}}
+- FED Funds Rate: {{interest_rate}}
+- S&P 500 Forward P/E: {{sp500_pe_forward}}
+- Corporate Earnings Revisions: {{earnings_revision}}
+
+## Price & Technicals:
+- MES Spot Price: ${{mes_price}}
+- 20-day MA: ${{ma_20}}, 50-day MA: ${{ma_50}}, 200-day MA: ${{ma_200}}
+- Overall Trend: {{trend_description}}
+- RSI (14-day): {{rsi_14}}
+- Volatility (VIX): {{vix_level}}
+
+### TASK
+1. **Probability**: Provide a likelihood (0–100%) that MES will rise at least +5% within the next 3 months.
+2. **Fundamental vs. Technical**: Briefly compare fundamental drivers vs. technical drivers.
+3. **Action Plan**: Suggest going Long, Short, or staying out. Explain.
+4. **Risk Factors**: Summarize the top macro risk (e.g., Fed rate hike surprise).
+
+In 2-4 sentences, with a recommended stop-loss and take-profit target.
+D) Probability of Reaching Specific Price Targets
+You might want a multi-target approach—e.g., the probability the price hits 4200, 4300, etc.
+
+yaml
+Copy
+You are a quantitative trading AI forecasting the probability of MES hitting specific price targets within the next 2 weeks.
+
+## Current Metrics:
+- Current MES Price: ${{current_price}}
+- Key Targets: ${{price_target_1}}, ${{price_target_2}}
+- 14-day RSI: {{rsi_14}}, MACD: {{macd}}, ATR: {{atr}}
+- Fundamental Snapshot: S&P 500 P/E = {{sp500_pe}}, Earnings Growth = {{earnings_growth}}%
+- Major Economic Events: {{economic_calendar}}
+
+### TASK
+1. Estimate:
+   - Probability of MES reaching **${{price_target_1}}** within 2 weeks.
+   - Probability of MES reaching **${{price_target_2}}** within 2 weeks.
+2. Provide a sentence explaining each probability.
+3. Recommend a single trade: **Buy**, **Sell**, or **No Trade** if uncertain.
+
+Answer in bullet points with approximate probabilities. Limit each bullet to 25 words.
+
+1. General Trading Recommendation Prompt
+This prompt summarizes the trading opportunity based on the provided technical indicators.
+
+bash
+Copy
+You are an expert trading assistant analyzing the MES futures contract using technical indicators.
+
+### Market Data:
+- Current Price: ${{last_close_price}}
+- 5-Day Moving Average: ${{ma_5}}
+- 20-Day Moving Average: ${{ma_20}}
+- 50-Day Moving Average: ${{ma_50}}
+- 200-Day Moving Average: ${{ma_200}}
+- Relative Strength Index (RSI): ${{rsi_14}}
+- MACD: ${{macd}}
+- ATR (Average True Range): ${{atr_14}}
+- Volume: ${{last_volume}}
+
+### Additional Insights:
+- Short-term trend: **${{short_term_trend}}** (Uptrend / Downtrend)
+- Medium-term trend: **${{medium_term_trend}}**
+- Long-term trend: **${{long_term_trend}}**
+- Support Levels: **${{s1}}, ${{s2}}, ${{s3}}**
+- Resistance Levels: **${{r1}}, ${{r2}}, ${{r3}}**
+
+### **TASK**
+Based on the above data:
+1. **Give a trade decision (Buy, Sell, or Hold).**
+2. **Explain why this is the best decision.**
+3. **Mention any risk factors traders should be aware of.**
+4. **Suggest a stop loss and target price.**
+
+Keep your answer concise (under 100 words).
+2. Short-Term Trade Decision Prompt (Day Trading)
+If you want AI to generate a decision based on intraday movements, use this:
+
+bash
+Copy
+You are a trading AI analyzing MES futures for short-term trades (day trading).
+
+### Recent Market Data (Last 1 Hour):
+- Current Price: **${{last_close_price}}**
+- 5-Min Moving Average: **${{ma_5min}}**
+- 15-Min Moving Average: **${{ma_15min}}**
+- 1-Hour Moving Average: **${{ma_1h}}**
+- VWAP: **${{vwap}}**
+- MACD Histogram: **${{macd_histogram}}**
+- RSI (5-Min): **${{rsi_5}}**
+- ATR (5-Min): **${{atr_5}}**
+- Volume Spike: **${{volume_spike}}**
+
+### Market Context:
+- Trend: **${{short_term_trend}}** (Uptrend / Downtrend)
+- Support Level: **${{s1}}**
+- Resistance Level: **${{r1}}**
+
+### **TASK**
+1. **Should a trader enter a position now? (Buy, Sell, or Wait)**
+2. **What is the best stop loss and target profit range?**
+3. **Is this a breakout, mean reversion, or momentum trade?**
+4. **What confirmation signals should the trader wait for before entering?**
+
+Be precise and actionable.
+3. Swing Trade Recommendation (1-Week to 1-Month)
+For traders looking at a longer-term position:
+
+markdown
+Copy
+You are an expert market analyst helping traders with MES futures swing trades.
+
+### Market Data:
+- Current Price: **${{last_close_price}}**
+- 5-Day Moving Average: **${{ma_5}}**
+- 20-Day Moving Average: **${{ma_20}}**
+- 50-Day Moving Average: **${{ma_50}}**
+- 200-Day Moving Average: **${{ma_200}}**
+- RSI (14-Day): **${{rsi_14}}**
+- MACD: **${{macd}}**
+- ATR (14-Day): **${{atr_14}}**
+- Volume Trend: **${{volume_trend}}**
+- Sentiment: **${{market_sentiment}}**
+
+### **TASK**
+1. **Should a trader buy, sell, or hold MES futures for a 1-week to 1-month trade?**
+2. **What is the strongest technical argument supporting this trade?**
+3. **What are the biggest risks?**
+4. **Suggest an ideal stop loss and profit-taking level.**
+
+Summarize clearly in 2-3 sentences.
+4. AI-Based "Barchart Opinion" Summary Prompt
+This prompt mimics Barchart’s rating system with AI providing explanations.
+
+markdown
+
+You are an AI-powered trading assistant generating an opinion report for MES futures.
+
+### Technical Indicator Ratings:
+- Short-term (5-day lookback): **${{short_term_signal}}** (Buy/Hold/Sell)
+- Medium-term (50-day lookback): **${{medium_term_signal}}** (Buy/Hold/Sell)
+- Long-term (200-day lookback): **${{long_term_signal}}** (Buy/Hold/Sell)
+- Trend Seeker® Approximation: **${{trend_seeker}}**
+
+### Summary:
+- **Overall Opinion: ${{overall_opinion}}% Buy/Sell/Hold**
+- **Trend Strength: ${{trend_strength}}** (Weak/Moderate/Strong)
+- **Volatility Level: ${{volatility_level}}** (Low/Medium/High)
+- **Key Support/Resistance Levels:** ${{s1}} / ${{r1}}
+
+### **TASK**
+1. **Summarize the Barchart-style opinion for MES futures.**
+2. **If the rating is a Buy/Sell, what is the most important factor supporting this view?**
+3. **What risks could change this opinion?**
+4. **How aggressive should traders be in taking action?**
+
+Provide a clear summary in under 100 words.
